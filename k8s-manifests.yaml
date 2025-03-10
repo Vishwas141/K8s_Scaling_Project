@@ -1,0 +1,105 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: example-deployment
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: custom-app
+  template:
+    metadata:
+      labels:
+        app: custom-app
+    spec:
+      containers:
+      - name: custom-app
+        image: custom-app:latest
+        imagePullPolicy: Never
+        ports:
+        - containerPort: 6000
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: custom-app-service
+spec:
+  selector:
+    app: custom-app
+  ports:
+    - name: user-count
+      port: 6000
+      targetPort: 6000
+  type: ClusterIP
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: custom-scaler-account
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: deployment-scaler
+rules:
+- apiGroups: ["apps"]
+  resources: ["deployments"]
+  verbs: ["get", "list", "watch", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: deployment-scaler-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: deployment-scaler
+subjects:
+- kind: ServiceAccount
+  name: custom-scaler-account
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: custom-scaler
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: custom-scaler
+  template:
+    metadata:
+      labels:
+        app: custom-scaler
+    spec:
+      serviceAccountName: custom-scaler-account
+      containers:
+      - name: custom-scaler
+        image: custom-k8s-scaler:latest
+        imagePullPolicy: Never
+        ports:
+        - containerPort: 5000
+        - containerPort: 8000
+        env:
+        - name: NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: DEPLOYMENT_NAME
+          value: "example-deployment"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: custom-scaler-service
+spec:
+  selector:
+    app: custom-scaler
+  ports:
+    - name: http
+      port: 80
+      targetPort: 5000
+    - name: metrics
+      port: 8000
+      targetPort: 8000
+  type: NodePort
