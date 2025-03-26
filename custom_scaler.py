@@ -31,9 +31,11 @@ SCALE_INCREMENT = int(os.getenv('SCALE_INCREMENT', '5'))
 user_count = Gauge('user_count', 'Number of active users')
 pod_count = Gauge('pod_count', 'Number of active pods')
 
+base_url = "http://10.13.2.28:5000"
+
 def get_current_user_count():
     try:
-        # Call the custom app's user_count endpoint via its service DNS
+        get_resource()
         url = "http://custom-app-service:6000/user_count"
         response = requests.get(url, timeout=5)
         if response.status_code == 200:
@@ -50,6 +52,18 @@ def get_current_user_count():
     current_value = user_count._value.get() + change
     user_count.set(max(0, current_value))
     return float(current_value)
+
+def get_resource():
+    try:
+        response = requests.get(base_url, timeout=5)
+        if response.status_code == 200:
+            return response.json()
+        else:
+            print("Non-200 response:", response.status_code)
+            return {"error": f"Non-200 response: {response.status_code}"}
+    except Exception as e:
+        print("Error fetching data:", e)
+        return {"error": str(e)}
 
 def get_current_pod_count():
     try:
@@ -205,6 +219,10 @@ def data():
         'user_count': user_count._value.get(),
         'pod_count': pod_count._value.get()
     })
+
+@app.route('/metric')
+def resource_data():
+    return jsonify(get_resource())
 
 def main():
     print(f"Starting custom scaler for deployment {DEPLOYMENT_NAME} in namespace {NAMESPACE}")
