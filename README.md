@@ -15,6 +15,8 @@ hostname -I  # Take the first IP from the output
 
 # Build Docker images
 docker build -t custom-k8s-scaler:latest -f Dockerfile.scaler .
+
+
 docker build -t custom-app:latest -f Dockerfile.app .
 
 # Load images into Minikube
