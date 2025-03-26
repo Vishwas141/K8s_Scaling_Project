@@ -11,7 +11,7 @@ current_user_count = 0
 def heavy_computation():
     """Run heavy computation to simulate resource-intensive work."""
     while True:
-        size = 1000  # Adjust the size for desired load
+        size = 5
         A = np.random.rand(size, size)
         B = np.random.rand(size, size)
         C = np.dot(A, B)

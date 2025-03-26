@@ -6,7 +6,7 @@ from sklearn.linear_model import LinearRegression
 import os
 from flask import Flask, render_template_string, jsonify
 from threading import Thread
-import requests  # newly added
+import requests
 
 app = Flask(__name__)
 
@@ -27,7 +27,9 @@ USERS_PER_POD = int(os.getenv('USERS_PER_POD', '3'))
 MIN_PODS = int(os.getenv('MIN_PODS', '2'))
 MAX_PODS = int(os.getenv('MAX_PODS', '400'))
 SCALE_INCREMENT = int(os.getenv('SCALE_INCREMENT', '5'))
-    
+CPU_THRESHOLD = float(os.getenv('CPU_THRESHOLD', '700'))  # mCPU
+MEMORY_THRESHOLD = float(os.getenv('MEMORY_THRESHOLD', '300'))  # MiB
+
 user_count = Gauge('user_count', 'Number of active users')
 pod_count = Gauge('pod_count', 'Number of active pods')
 
@@ -35,7 +37,6 @@ base_url = "http://10.13.2.28:5000"
 
 def get_current_user_count():
     try:
-        get_resource()
         url = "http://custom-app-service:6000/user_count"
         response = requests.get(url, timeout=5)
         if response.status_code == 200:
@@ -106,14 +107,22 @@ def hybrid_scaling(historical_data, current_users):
         desired_pods = min(desired_pods + SCALE_INCREMENT, MAX_PODS)
     return desired_pods
 
-def scale_deployment_with_hybrid(current_users, historical_data):
+def resource_based_scaling(metrics, current_replicas):
+    total_cpu_usage_mCPU = metrics.get("total_cpu_usage_mCPU", 0)
+    total_memory_usage_MiB = metrics.get("total_memory_usage_MiB", 0)
+
+    if total_cpu_usage_mCPU > CPU_THRESHOLD or total_memory_usage_MiB > MEMORY_THRESHOLD:
+        print(f"Resource threshold exceeded: CPU {total_cpu_usage_mCPU} mCPU, Memory {total_memory_usage_MiB} MiB")
+        return max(current_replicas + SCALE_INCREMENT, MAX_PODS)
+    return current_replicas
+
+def scale_deployment(desired_replicas):
     try:
         deployment = apps_v1.read_namespaced_deployment(
             name=DEPLOYMENT_NAME,
             namespace=NAMESPACE
         )
         current_replicas = deployment.spec.replicas
-        desired_replicas = hybrid_scaling(historical_data, current_users)
         if desired_replicas != current_replicas:
             deployment.spec.replicas = desired_replicas
             apps_v1.patch_namespaced_deployment(
@@ -135,8 +144,18 @@ def scaler_loop():
         historical_data.append(current_users)
         if len(historical_data) > PREDICTION_WINDOW:
             historical_data.pop(0)
+
+        # First, scale based on user-pod algorithm
+        desired_replicas = hybrid_scaling(historical_data, current_users)
+        scale_deployment(desired_replicas)
+
+        # Then, check resource usage and scale if necessary
+        metrics = get_resource()
+        if metrics and "error" not in metrics:
+            desired_replicas = resource_based_scaling(metrics, desired_replicas)
+            scale_deployment(desired_replicas)
+
         print(f"User count: {current_users}, Pod count: {get_current_pod_count()}")
-        scale_deployment_with_hybrid(current_users, historical_data)
         time.sleep(CHECK_INTERVAL)
 
 @app.route('/')
@@ -160,12 +179,16 @@ def index():
         <div class="container">
             <h1>Kubernetes Scaler Dashboard</h1>
             <div class="chart-container">
-                <canvas id="myChart"></canvas>
+                <canvas id="userPodChart"></canvas>
+            </div>
+            <h2>Resource Usage</h2>
+            <div class="chart-container">
+                <canvas id="resourceChart"></canvas>
             </div>
         </div>
         <script>
-            const ctx = document.getElementById('myChart').getContext('2d');
-            const chart = new Chart(ctx, {
+            const ctx1 = document.getElementById('userPodChart').getContext('2d');
+            const userPodChart = new Chart(ctx1, {
                 type: 'line',
                 data: {
                     labels: [],
@@ -185,34 +208,73 @@ def index():
                     responsive: true,
                     maintainAspectRatio: false,
                     scales: {
-                        y: {
-                            beginAtZero: true
-                        }
+                        y: { beginAtZero: true }
                     }
                 }
             });
-            function updateChart() {
+
+            const ctx2 = document.getElementById('resourceChart').getContext('2d');
+            const resourceChart = new Chart(ctx2, {
+                type: 'line',
+                data: {
+                    labels: [],
+                    datasets: [{
+                        label: 'CPU Usage (mCPU)',
+                        data: [],
+                        borderColor: 'rgb(54, 162, 235)',
+                        tension: 0.1
+                    }, {
+                        label: 'Memory Usage (MiB)',
+                        data: [],
+                        borderColor: 'rgb(255, 159, 64)',
+                        tension: 0.1
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        y: { beginAtZero: true }
+                    }
+                }
+            });
+
+            function updateCharts() {
                 fetch('/data')
                     .then(response => response.json())
                     .then(data => {
                         const now = new Date().toLocaleTimeString();
-                        chart.data.labels.push(now);
-                        chart.data.datasets[0].data.push(data.user_count);
-                        chart.data.datasets[1].data.push(data.pod_count);
-                        if (chart.data.labels.length > 20) {
-                            chart.data.labels.shift();
-                            chart.data.datasets[0].data.shift();
-                            chart.data.datasets[1].data.shift();
+                        userPodChart.data.labels.push(now);
+                        userPodChart.data.datasets[0].data.push(data.user_count);
+                        userPodChart.data.datasets[1].data.push(data.pod_count);
+                        if (userPodChart.data.labels.length > 20) {
+                            userPodChart.data.labels.shift();
+                            userPodChart.data.datasets[0].data.shift();
+                            userPodChart.data.datasets[1].data.shift();
                         }
-                        chart.update();
+                        userPodChart.update();
+                    });
+                
+                fetch('/metric')
+                    .then(response => response.json())
+                    .then(data => {
+                        const now = new Date().toLocaleTimeString();
+                        resourceChart.data.labels.push(now);
+                        resourceChart.data.datasets[0].data.push(data.total_cpu_usage_mCPU || 0);
+                        resourceChart.data.datasets[1].data.push(data.total_memory_usage_MiB || 0);
+                        if (resourceChart.data.labels.length > 20) {
+                            resourceChart.data.labels.shift();
+                            resourceChart.data.datasets[0].data.shift();
+                            resourceChart.data.datasets[1].data.shift();
+                        }
+                        resourceChart.update();
                     });
             }
-            setInterval(updateChart, 5000);
+            setInterval(updateCharts, 5000);
         </script>
     </body>
     </html>
     ''')
-
 @app.route('/data')
 def data():
     return jsonify({
